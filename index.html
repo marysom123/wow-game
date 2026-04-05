@@ -5,10 +5,390 @@
     <title>黑暗征途</title>
     <script src="https://cdn.jsdelivr.net/npm/phaser@3.70.0/dist/phaser.min.js"></script>
     <style>
-        body { margin: 0; background: #1a1a2e; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; display: flex; justify-content: center; align-items: center; min-height: 100vh; overflow: hidden; }
+        canvas { display: block; }
     </style>
 </head>
 <body>
-<script type="module" src="src/main.js"></script>
+<script>
+// ==================== PLAYER ====================
+class Player extends Phaser.Physics.Arcade.Sprite {
+    constructor(scene, x, y) {
+        super(scene, x, y, 'player_idle', 0);
+        scene.add.existing(this);
+        scene.physics.add.existing(this);
+        this.setCollideWorldBounds(true);
+        this.body.setSize(24, 48);
+        this.body.setOffset(6, 16);
+        this.body.setMaxVelocity(300, 600);
+        this.hp = 100; this.maxHp = 100;
+        this.mp = 50; this.maxMp = 50;
+        this.atk = 10;
+        this.spells = {
+            attack: { mpCost: 0, cooldownMs: 300, lastUsed: 0 },
+            fireball: { mpCost: 10, cooldownMs: 3000, lastUsed: 0 },
+            lightning: { mpCost: 20, cooldownMs: 8000, lastUsed: 0 }
+        };
+        this.isAttacking = false;
+        this.isCasting = false;
+        this.facingRight = true;
+        this.cursors = scene.input.keyboard.createCursorKeys();
+        this.keyA = scene.input.keyboard.addKey('A');
+        this.keyD = scene.input.keyboard.addKey('D');
+        this.keyW = scene.input.keyboard.addKey('W');
+        this.keyJ = scene.input.keyboard.addKey('J');
+        this.keyK = scene.input.keyboard.addKey('K');
+        this.keyL = scene.input.keyboard.addKey('L');
+        this.spaceKey = scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+    }
+    update(time) {
+        const left = this.cursors.left.isDown || this.keyA.isDown;
+        const right = this.cursors.right.isDown || this.keyD.isDown;
+        if (left) { this.setVelocityX(-200); this.setFlipX(true); this.facingRight = false; }
+        else if (right) { this.setVelocityX(200); this.setFlipX(false); this.facingRight = true; }
+        else { this.setVelocityX(0); }
+        const jUp = Phaser.Input.Keyboard.JustDown;
+        if ((jUp(this.cursors.up) || jUp(this.keyW) || jUp(this.spaceKey)) && this.body.blocked.down) {
+            this.setVelocityY(-420);
+        }
+        if (this.mp < this.maxMp) this.mp = Math.min(this.maxMp, this.mp + 0.04);
+        if (!this.isAttacking && !this.isCasting) {
+            if (jUp(this.keyK)) this.castFireball(time);
+            else if (jUp(this.keyL)) this.castLightning(time);
+            else if (jUp(this.keyJ)) this.attack(time);
+        }
+    }
+    attack(time) {
+        if (time - this.spells.attack.lastUsed < this.spells.attack.cooldownMs) return;
+        this.spells.attack.lastUsed = time;
+        this.isAttacking = true;
+        this.setVelocityX(0);
+        this.scene.events.emit('playerAttack', {
+            x: this.x + (this.facingRight ? 30 : -30),
+            y: this.y, direction: this.facingRight ? 1 : -1, damage: this.atk
+        });
+        this.scene.time.delayedCall(300, () => { this.isAttacking = false; });
+    }
+    castFireball(time) {
+        const sp = this.spells.fireball;
+        if (this.mp < sp.mpCost) { this.scene.events.emit('playerNoMp'); return; }
+        if (time - sp.lastUsed < sp.cooldownMs) return;
+        sp.lastUsed = time; this.mp -= sp.mpCost; this.isCasting = true;
+        this.scene.events.emit('playerCastSpell', { spellName: 'fireball', x: this.x, y: this.y - 10, direction: this.facingRight ? 1 : -1, damage: this.atk * 2 });
+        this.scene.time.delayedCall(500, () => { this.isCasting = false; });
+    }
+    castLightning(time) {
+        const sp = this.spells.lightning;
+        if (this.mp < sp.mpCost) { this.scene.events.emit('playerNoMp'); return; }
+        if (time - sp.lastUsed < sp.cooldownMs) return;
+        sp.lastUsed = time; this.mp -= sp.mpCost; this.isCasting = true;
+        this.scene.events.emit('playerCastSpell', { spellName: 'lightning', x: this.x, y: this.y, direction: this.facingRight ? 1 : -1, damage: this.atk * 3 });
+        this.scene.time.delayedCall(600, () => { this.isCasting = false; });
+    }
+    takeDamage(amount) {
+        if (this.hp <= 0) return;
+        this.hp = Math.max(0, this.hp - amount);
+        this.setTint(0xff0000);
+        this.scene.time.delayedCall(150, () => { if (this.hp > 0) this.clearTint(); });
+        if (this.hp <= 0) this.scene.events.emit('playerDead');
+    }
+}
+
+// ==================== ENEMY ====================
+class Enemy extends Phaser.Physics.Arcade.Sprite {
+    constructor(scene, x, y, type, hp, atk, spd, scoreValue) {
+        super(scene, x, y, type, 0);
+        scene.add.existing(this);
+        scene.physics.add.existing(this);
+        this.scene = scene; this.type = type;
+        this.hp = hp; this.maxHp = hp; this.atk = atk; this.spd = spd;
+        this.scoreValue = scoreValue || 10;
+        this.lastAttackTime = 0; this.enraged = false;
+        this.body.setSize(this.width * 0.8, this.height * 0.9);
+        this.body.setOffset(4, 8);
+        this.setCollideWorldBounds(true);
+    }
+    update(player, time) {
+        if (!player || !player.active || !this.active) return;
+        const dist = Phaser.Math.Distance.Between(this.x, this.y, player.x, player.y);
+        if (this.type === 'darkknight') {
+            if (this.hp <= this.maxHp * 0.5 && !this.enraged) {
+                this.enraged = true;
+                this.spd = Math.floor(this.spd * 1.5);
+                this.atk = Math.floor(this.atk * 1.3);
+                this.setTint(0xff0000);
+                this.scene.time.delayedCall(200, () => { if (this.active) this.clearTint(); });
+                const enrageTxt = this.scene.add.text(this.x, this.y - 60, '⚔️ 狂暴!', { fontSize: '22px', fill: '#ff0000', fontFamily: 'Arial Black' }).setOrigin(0.5).setDepth(200);
+                this.scene.time.delayedCall(1200, () => enrageTxt.destroy());
+            }
+        }
+        if (dist < 400) {
+            const dir = this.x < player.x ? 1 : -1;
+            this.setVelocityX(this.spd * dir);
+            this.setFlipX(dir < 0);
+            if (dist < 45) {
+                const now = this.scene.time.now;
+                const cd = this.type === 'darkknight' ? 1200 : 1000;
+                if (now - this.lastAttackTime > cd) {
+                    this.lastAttackTime = now;
+                    player.takeDamage(this.atk);
+                    this.scene.screenShake && this.scene.screenShake(this.type === 'darkknight' ? 8 : 4);
+                }
+            }
+        } else {
+            this.setVelocityX(0);
+        }
+    }
+    takeDamage(amount) {
+        if (!this.active) return;
+        this.hp -= amount;
+        this.setTint(0xff0000);
+        this.scene.time.delayedCall(100, () => { if (this.active) this.clearTint(); });
+        const dmgTxt = this.scene.add.text(this.x, this.y - 30, `-${amount}`, { fontSize: this.type === 'darkknight' ? '20px' : '14px', fill: '#ffff00', fontFamily: 'Arial Black' }).setOrigin(0.5).setDepth(200);
+        this.scene.time.delayedCall(400, () => dmgTxt.destroy());
+        if (this.type === 'darkknight' && this.scene.events) {
+            this.scene.events.emit('bossDamaged', this.hp, this.maxHp);
+        }
+        if (this.hp <= 0) { this.hp = 0; this.onDeath(); }
+    }
+    onDeath() {
+        if (!this.active) return;
+        const color = this.type === 'darkknight' ? 0xff0000 : (this.type === 'ogre' ? 0x8B4513 : 0x00ff44);
+        for (let i = 0; i < 8; i++) {
+            const p = this.scene.add.circle(this.x + Phaser.Math.Between(-20,20), this.y + Phaser.Math.Between(-20,20), Phaser.Math.Between(4,10), color, 0.8);
+            this.scene.time.delayedCall(500, () => p.destroy());
+        }
+        if (this.type === 'darkknight') {
+            this.scene.hideBossHP && this.scene.hideBossHP();
+            this.scene.screenShake && this.scene.screenShake(12);
+        }
+        this.scene.events.emit('enemyKilled', this.type, this.x, this.y, this.scoreValue);
+        this.destroy();
+    }
+}
+
+// ==================== HUD ====================
+class HUD {
+    constructor(scene, player) {
+        this.scene = scene; this.player = player;
+        this.hpBg = scene.add.rectangle(15, 15, 200, 22, 0x333333).setOrigin(0).setDepth(100);
+        this.hpBar = scene.add.rectangle(15, 15, 200, 22, 0xff3333).setOrigin(0).setDepth(101);
+        this.hpText = scene.add.text(20, 18, 'HP 100/100', { fontSize: '13px', fill: '#fff', fontFamily: 'Arial' }).setDepth(102);
+        this.mpBg = scene.add.rectangle(15, 40, 150, 16, 0x333333).setOrigin(0).setDepth(100);
+        this.mpBar = scene.add.rectangle(15, 40, 150, 16, 0x3366ff).setOrigin(0).setDepth(101);
+        this.mpText = scene.add.text(20, 43, 'MP 50/50', { fontSize: '11px', fill: '#fff', fontFamily: 'Arial' }).setDepth(102);
+        const sbX = 620, sbY = 520;
+        this.skillKBg = scene.add.rectangle(sbX, sbY, 50, 50, 0x222222).setOrigin(0).setDepth(100).setStrokeStyle(2, 0x444444);
+        this.skillKText = scene.add.text(sbX + 25, sbY + 10, 'K\n火球', { fontSize: '11px', fill: '#4488ff', fontFamily: 'Arial', align: 'center' }).setOrigin(0.5, 0).setDepth(102);
+        this.skillKCooldown = scene.add.rectangle(sbX, sbY, 50, 50, 0x000000, 0.7).setOrigin(0, 1).setDepth(101);
+        this.skillLBg = scene.add.rectangle(sbX + 58, sbY, 50, 50, 0x222222).setOrigin(0).setDepth(100).setStrokeStyle(2, 0x444444);
+        this.skillLText = scene.add.text(sbX + 58 + 25, sbY + 10, 'L\n闪电', { fontSize: '11px', fill: '#ffff00', fontFamily: 'Arial', align: 'center' }).setOrigin(0.5, 0).setDepth(102);
+        this.skillLCooldown = scene.add.rectangle(sbX + 58, sbY, 50, 50, 0x000000, 0.7).setOrigin(0, 1).setDepth(101);
+        this.scoreText = scene.add.text(785, 15, '分数: 0', { fontSize: '16px', fill: '#ffcc00', fontFamily: 'Arial Black' }).setOrigin(1, 0).setDepth(102);
+        this.killText = scene.add.text(785, 38, '击杀: 0', { fontSize: '13px', fill: '#aaaaaa', fontFamily: 'Arial' }).setOrigin(1, 0).setDepth(102);
+        this.levelText = scene.add.text(400, 15, '第 1 关: 黑暗森林', { fontSize: '16px', fill: '#ffffff', fontFamily: 'Arial Black' }).setOrigin(0.5, 0).setDepth(102);
+    }
+    update(time) {
+        if (!this.player || !this.player.active) return;
+        const hpR = Math.max(0, this.player.hp / this.player.maxHp);
+        this.hpBar.width = 200 * hpR;
+        this.hpText.setText(`HP ${Math.ceil(this.player.hp)}/${this.player.maxHp}`);
+        this.hpBar.setFillStyle(hpR < 0.25 ? 0xff0000 : hpR < 0.5 ? 0xff8800 : 0xff3333);
+        const mpR = Math.max(0, this.player.mp / this.player.maxMp);
+        this.mpBar.width = 150 * mpR;
+        this.mpText.setText(`MP ${Math.ceil(this.player.mp)}/${this.player.maxMp}`);
+        const fbR = Math.min(1, (time - this.player.spells.fireball.lastUsed) / this.player.spells.fireball.cooldownMs);
+        this.skillKCooldown.height = 50 * (1 - fbR);
+        this.skillKCooldown.y = 570 - 50 * (1 - fbR);
+        const ltR = Math.min(1, (time - this.player.spells.lightning.lastUsed) / this.player.spells.lightning.cooldownMs);
+        this.skillLCooldown.height = 50 * (1 - ltR);
+        this.skillLCooldown.y = 570 - 50 * (1 - ltR);
+    }
+    setScore(score, kills) {
+        this.scoreText.setText(`分数: ${score}`);
+        this.killText.setText(`击杀: ${kills}`);
+    }
+    setLevel(name) { this.levelText.setText(name); }
+}
+
+// ==================== GAME SCENES ====================
+const GW = 800, GH = 600;
+
+class BootScene extends Phaser.Scene {
+    constructor() { super('BootScene'); }
+    preload() {
+        const g = this.make.graphics({ x: 0, y: 0, add: false });
+        g.fillStyle(0x00ff88, 1); g.fillRect(0, 0, 32, 48); g.generateTexture('player_idle', 32, 48);
+        g.clear(); g.fillStyle(0x4488ff, 1); g.fillCircle(16, 16, 16); g.generateTexture('fireball', 32, 32);
+        g.clear(); g.fillStyle(0xffff00, 1); g.fillCircle(40, 40, 40); g.generateTexture('lightning', 80, 80);
+        g.clear(); g.fillStyle(0x888888, 1); g.fillRect(0, 0, 32, 16); g.generateTexture('platform', 32, 16);
+    }
+    create() { this.scene.start('MenuScene'); }
+}
+
+class MenuScene extends Phaser.Scene {
+    constructor() { super('MenuScene'); }
+    create() {
+        this.add.text(GW/2, 150, '黑暗征途', { fontSize: '52px', fill: '#ffcc00', fontFamily: 'Arial Black' }).setOrigin(0.5);
+        this.add.text(GW/2, 220, 'WoW Style Side-Scroller', { fontSize: '18px', fill: '#aaaaaa' }).setOrigin(0.5);
+        const btn = this.add.text(GW/2, 350, '[ 开始游戏 ]', { fontSize: '36px', fill: '#ffffff', fontFamily: 'Arial' }).setOrigin(0.5).setInteractive();
+        btn.on('pointerover', () => btn.setFill('#ffcc00'));
+        btn.on('pointerout', () => btn.setFill('#ffffff'));
+        btn.on('pointerdown', () => this.scene.start('GameScene'));
+        this.add.text(GW/2, 480, 'WASD移动 | J普攻 | K火球 | L闪电 | 空格跳跃', { fontSize: '14px', fill: '#888888' }).setOrigin(0.5);
+    }
+}
+
+class GameScene extends Phaser.Scene {
+    constructor() { super('GameScene'); }
+    create() {
+        this.add.rectangle(GW/2, GH/2, GW, GH, 0x1a1a2e);
+        const ground = this.physics.add.staticGroup();
+        const gs = ground.create(GW/2, GH - 15, 'platform');
+        gs.setScale(GW / 32, 1).refreshBody(); gs.setVisible(false);
+        this.score = 0; this.totalKills = 0; this.currentLevel = 1;
+        this.player = new Player(this, GW / 2, GH - 100);
+        this.physics.add.collider(this.player, ground);
+        this.hud = new HUD(this, this.player);
+        this.projectiles = this.physics.add.group();
+        this.enemies = this.physics.add.group();
+        this.screenShake = (i = 5) => { this.cameras.main.shake(200, i / 1000); };
+        this.bossHPBar = null; this.bossHPBarBg = null; this.bossNameText = null;
+        this.showBossHP = () => {
+            if (this.bossHPBar) return;
+            const bw = 400, bh = 24, bx = (GW - bw) / 2, by = 60;
+            this.bossHPBarBg = this.add.rectangle(bx, by, bw, bh, 0x333333).setOrigin(0).setDepth(150);
+            this.bossHPBar = this.add.rectangle(bx, by, bw, bh, 0xff0000).setOrigin(0).setDepth(151);
+            this.bossNameText = this.add.text(GW/2, by - 18, '黑暗骑士', { fontSize: '18px', fill: '#ff3333', fontFamily: 'Arial Black' }).setOrigin(0.5).setDepth(152);
+        };
+        this.hideBossHP = () => {
+            if (this.bossHPBar) { this.bossHPBar.destroy(); this.bossHPBar = null; }
+            if (this.bossHPBarBg) { this.bossHPBarBg.destroy(); this.bossHPBarBg = null; }
+            if (this.bossNameText) { this.bossNameText.destroy(); this.bossNameText = null; }
+        };
+        this.player.on('playerAttack', (data) => {
+            const slash = this.add.rectangle(data.x, data.y - 5, 40, 20, 0xffffff, 0.8);
+            slash.setRotation(data.direction > 0 ? 0.3 : -0.3);
+            this.time.delayedCall(150, () => slash.destroy());
+            this.enemies.getChildren().forEach(e => {
+                if (e && e.active && Math.abs(e.x - data.x) < 50 && Math.abs(e.y - data.y) < 40) e.takeDamage(data.damage);
+            });
+        });
+        this.player.on('playerCastSpell', (data) => {
+            if (data.spellName === 'fireball') {
+                const fb = this.physics.add.sprite(data.x, data.y, 'fireball');
+                fb.damage = data.damage; fb.setVelocityX(data.direction * 250);
+                this.projectiles.add(fb);
+                this.time.addEvent({ delay: 50, repeat: 10, callback: () => { if (fb.active) { const t = this.add.circle(fb.x, fb.y, 8, 0xff6600, 0.5); this.time.delayedCall(100, () => t.destroy()); } } });
+                this.time.delayedCall(2000, () => { if (fb.active) fb.destroy(); });
+            } else if (data.spellName === 'lightning') {
+                const aoe = this.add.circle(data.x, data.y, 0, 0xffff00, 0.3);
+                const ring = this.add.circle(data.x, data.y, 0, 0xffff00, 0.8);
+                ring.setStrokeStyle(4, 0xffff00);
+                let r = 0;
+                this.time.addEvent({ delay: 50, repeat: 10, callback: () => {
+                    r += 10; aoe.setRadius(r); ring.setRadius(r);
+                    this.enemies.getChildren().forEach(e => { if (e && e.active && Phaser.Math.Distance.Between(data.x, data.y, e.x, e.y) < r) e.takeDamage(Math.floor(data.damage / 3)); });
+                }});
+                this.time.delayedCall(600, () => { aoe.destroy(); ring.destroy(); });
+            }
+        });
+        this.player.on('playerNoMp', () => {
+            const t = this.add.text(this.player.x, this.player.y - 60, 'MP不足!', { fontSize: '16px', fill: '#ff3333', fontFamily: 'Arial Black' }).setOrigin(0.5);
+            this.time.delayedCall(500, () => t.destroy());
+        });
+        this.levelConfigs = {
+            1: { name: '第 1 关: 黑暗森林', waves: [{ enemies: [{ type: 'goblin', count: 2 }], delay: 1000 }, { enemies: [{ type: 'goblin', count: 3 }], delay: 4000 }], goalKills: 5 },
+            2: { name: '第 2 关: 废弃矿坑', waves: [{ enemies: [{ type: 'skeleton', count: 3 }], delay: 1000 }, { enemies: [{ type: 'skeleton', count: 3 }], delay: 4000 }, { enemies: [{ type: 'skeleton', count: 2 }], delay: 7000 }], goalKills: 8 },
+            3: { name: '第 3 关: 兽人营地', waves: [{ enemies: [{ type: 'goblin', count: 3 }], delay: 1000 }, { enemies: [{ type: 'ogre', count: 2 }], delay: 4000 }], goalKills: 5 },
+            4: { name: 'BOSS: 黑暗骑士', waves: [{ enemies: [{ type: 'darkknight', count: 1 }], delay: 2000 }], goalKills: 1 }
+        };
+        this.levelEnemyTypes = {
+            goblin: { hp: 30, atk: 5, spd: 80, score: 10 },
+            skeleton: { hp: 50, atk: 8, spd: 60, score: 20 },
+            ogre: { hp: 150, atk: 15, spd: 40, score: 50 },
+            darkknight: { hp: 500, atk: 20, spd: 100, score: 200 }
+        };
+        this.events.on('enemyKilled', (type, x, y, score) => {
+            this.totalKills++; this.score += (score || 10);
+            this.hud.setScore(this.score, this.totalKills);
+            const t = this.add.text(x, y - 40, `+${score || 10}`, { fontSize: '16px', fill: '#00ff00', fontFamily: 'Arial Black' }).setOrigin(0.5).setDepth(200);
+            this.time.delayedCall(600, () => t.destroy());
+            const alive = this.enemies.getChildren().filter(e => e.active).length;
+            const cfg = this.levelConfigs[this.currentLevel];
+            if (cfg && this.totalKills >= cfg.goalKills && alive === 0) this.onLevelComplete();
+        });
+        this.checkLevelComplete = () => {};
+        this.onLevelComplete = () => {
+            this.hideBossHP();
+            if (this.currentLevel >= 4) {
+                this.time.delayedCall(1500, () => { this.scene.start('GameOverScene', { victory: true, score: this.score }); });
+                return;
+            }
+            this.currentLevel++;
+            const nc = this.levelConfigs[this.currentLevel];
+            const ov = this.add.rectangle(GW/2, GH/2, 400, 200, 0x000000, 0.85).setDepth(300).setOrigin(0.5);
+            const ct = this.add.text(GW/2, GH/2 - 40, `第 ${this.currentLevel - 1} 关完成!`, { fontSize: '28px', fill: '#ffcc00', fontFamily: 'Arial Black' }).setOrigin(0.5).setDepth(301);
+            const nt = this.add.text(GW/2, GH/2 + 20, nc.name, { fontSize: '18px', fill: '#ffffff', fontFamily: 'Arial' }).setOrigin(0.5).setDepth(301);
+            this.time.delayedCall(2500, () => { ov.destroy(); ct.destroy(); nt.destroy(); this.hud.setLevel(nc.name); this.spawnLevelWaves(); });
+        };
+        this.spawnLevelWaves = () => {
+            if (!this.textures.exists('goblin')) {
+                const mk = (c, rx, ry, rw, rh, fx, fy, fw, fh) => { const g = this.make.graphics({ x: 0, y: 0, add: false }); g.fillStyle(c, 1); g.fillRect(rx, ry, rw, rh); g.fillStyle(0x000000, 1); g.fillRect(fx, fy, fw, fh); return g; };
+                let g = mk(0x00cc44, 0, 0, 24, 24, 6, 6, 4, 4); g.generateTexture('goblin', 24, 24);
+                g = mk(0xcccccc, 0, 0, 24, 32, 6, 6, 4, 4); g.generateTexture('skeleton', 24, 32);
+                g = mk(0x8B4513, 0, 0, 40, 48, 14, 8, 12, 8); g.generateTexture('ogre', 40, 48);
+                g = this.make.graphics({ x: 0, y: 0, add: false }); g.fillStyle(0x333333, 1); g.fillRect(0, 0, 32, 56); g.fillStyle(0xff0000, 1); g.fillRect(10, 5, 12, 12); g.fillStyle(0x6600aa, 1); g.fillRect(12, 20, 8, 36); g.generateTexture('darkknight', 32, 56);
+            }
+            const cfg = this.levelConfigs[this.currentLevel];
+            if (!cfg) return;
+            cfg.waves.forEach(wave => {
+                this.time.delayedCall(wave.delay, () => {
+                    wave.enemies.forEach(ed => {
+                        for (let i = 0; i < ed.count; i++) {
+                            const st = this.levelEnemyTypes[ed.type];
+                            const e = new Enemy(this, 100 + (i % 3) * 250 + Math.random() * 100, 400 + Math.random() * 100, ed.type, st.hp, st.atk, st.spd, st.score);
+                            this.enemies.add(e);
+                            this.physics.add.collider(e, ground);
+                        }
+                        if (ed.type === 'darkknight') {
+                            this.time.delayedCall(500, () => { const b = this.enemies.getChildren().find(e => e.type === 'darkknight'); if (b) this.showBossHP(); });
+                        }
+                    });
+                });
+            });
+        };
+        this.hud.setLevel(this.levelConfigs[1].name);
+        this.spawnLevelWaves();
+        this.physics.add.overlap(this.projectiles, this.enemies, (p, e) => { if (e.takeDamage) e.takeDamage(p.damage || 10); if (p.active) p.destroy(); });
+        this.physics.add.overlap(this.player, this.enemies, () => {});
+        this.player.on('playerDead', () => { this.time.delayedCall(1000, () => { this.scene.start('GameOverScene', { victory: false, score: this.score }); }); });
+    }
+    update(time) {
+        if (this.player && this.player.active) { this.player.update(time); this.hud.update(time); }
+        this.enemies.getChildren().forEach(e => { if (e && e.update && e.active) e.update(this.player, time); });
+    }
+}
+
+class GameOverScene extends Phaser.Scene {
+    constructor() { super('GameOverScene'); }
+    create(data) {
+        const vic = data && data.victory;
+        this.add.text(GW/2, 200, vic ? '通关胜利！' : '你已阵亡', { fontSize: '48px', fill: vic ? '#ffcc00' : '#ff3333', fontFamily: 'Arial Black' }).setOrigin(0.5);
+        if (data && data.score) this.add.text(GW/2, 270, `分数: ${data.score}`, { fontSize: '24px', fill: '#aaaaaa', fontFamily: 'Arial' }).setOrigin(0.5);
+        const btn = this.add.text(GW/2, 350, '[ 重新开始 ]', { fontSize: '28px', fill: '#ffffff', fontFamily: 'Arial' }).setOrigin(0.5).setInteractive();
+        btn.on('pointerdown', () => this.scene.start('MenuScene'));
+    }
+}
+
+new Phaser.Game({
+    type: Phaser.AUTO,
+    width: GW,
+    height: GH,
+    physics: { default: 'arcade', arcade: { gravity: { y: 800 }, debug: false } },
+    scene: [BootScene, MenuScene, GameScene, GameOverScene]
+});
+</script>
 </body>
 </html>
